@@ -2017,7 +2017,7 @@ namespace{
 				}
                 }
                         
-		return false;
+		// return false;
 		for (int ii=0; ii<TDcnt; ii++)
 		{
 			errs() << "To Delete: " << ToDelete[ii] << "\n";
@@ -2055,6 +2055,7 @@ namespace{
 		////////
 
 		errs() << " done host_sig pass.\n\n" ;
+		return true;
         }
 // 
 
