@@ -3024,94 +3024,251 @@ namespace{
 // 10th pass
 // host-side memory bandwidth reporting trigger
 // ensure that this new pass (-instru-mem-bw) is executed after the -instru-host-measure pass when you run opt. Modify your build scripts or command line accordingly.
-    struct instru_memory_bandwidth : public ModulePass{
-        static char ID;
-        Function *hookReportBandwidth;
-        Function *hookMeasureKernel; // To find the insertion point
+struct instru_memory_bandwidth : public ModulePass{
+	static char ID;
+	Function *hookReportBandwidth;
+	Function *hookReportFlops;
+	Function *hookMeasureKernel; // To find the insertion point
 
-        instru_memory_bandwidth() : ModulePass(ID) {}
+	instru_memory_bandwidth() : ModulePass(ID) {}
+
+	virtual bool runOnModule(Module &M) {
+		LLVMContext &C = M.getContext();
+		Type* VoidTy = Type::getVoidTy(C);
+
+		errs() << "\n ======== 10th pass: Memory Bandwidth Reporting Hook =============== \n\n";
+
+		Constant *hookFuncReportBandwidth = cast<Function>(M.getOrInsertFunction("reportMemoryBandwidth", VoidTy).getCallee());
+		if (!hookFuncReportBandwidth) {
+			errs() << "Error: Could not insert reportMemoryBandwidth function!\n";
+			return false;
+		}
+
+		hookReportBandwidth = cast<Function>(hookFuncReportBandwidth);
+
+		// --- Add GetOrInsert for reportFlops ---
+        Constant *hookFuncReportFlops = cast<Function>(M.getOrInsertFunction("reportFlops", VoidTy).getCallee());
+        if (!hookFuncReportFlops) {
+            errs() << "Error: Could not insert reportFlops function!\n";
+            return false;
+        }
+        hookReportFlops = cast<Function>(hookFuncReportFlops);
+        // --- End Add ---
+
+		hookMeasureKernel = cast<Function>(M.getOrInsertFunction("measureKernel", VoidTy, Type::getInt32Ty(C)).getCallee());
+		if (!hookMeasureKernel) {
+			 errs() << "Warning: measureKernel function not found. Bandwidth reporting hook cannot be inserted.\n";
+			 return false;
+		}
+
+
+		bool modified = false;
+		for(Module::iterator F = M.begin(), E = M.end(); F!= E; ++F) {
+
+			bool isKernel = false;
+			for (int ii=0; ii<KNcnt; ii++) {
+				if ( F->getName().str().find(CUDAKN[ii]) != std::string::npos ) {
+					isKernel = true;
+					break;
+				}
+			}
+			if (isKernel) continue;
+
+			bool isAnalysisFunc = false;
+			for (int ii=0; ii<AFsize; ii++) {
+				if ( F->getName().str().find(AF[ii]) != std::string::npos ) {
+					isAnalysisFunc = true;
+					break;
+				}
+			}
+			 if (isAnalysisFunc) continue;
+
+
+			for(Function::iterator BB = F->begin(), E = F->end(); BB != E; ++BB) {
+				if (runOnBasicBlock(BB)) {
+					modified = true;
+				}
+			}
+		}
+		return modified;
+	}
+
+	virtual bool runOnBasicBlock(Function::iterator &BB) {
+		bool modified = false;
+		LLVMContext &C = BB->getContext();
+
+		for(BasicBlock::iterator BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
+			if (auto *op = dyn_cast<CallInst>(&(*BI))) {
+				Function* calledFunc = op->getCalledFunction();
+				if (calledFunc == hookMeasureKernel) {
+					// Check if it's the measureKernel(2) call
+					if (op->getNumOperands() == 1) {
+						Value* arg = op->getArgOperand(0);
+						if (auto* constInt = dyn_cast<ConstantInt>(arg)) {
+							if (constInt->getZExtValue() == 2) {
+								// Found measureKernel(2), insert reportMemoryBandwidth call after it
+								IRBuilder<> builder(op);
+								builder.SetInsertPoint(&(*BB), ++builder.GetInsertPoint()); // Point after the CallInst
+								builder.CreateCall(hookReportBandwidth, {});
+								errs() << "Inserted reportMemoryBandwidth call after measureKernel(2) in function " << BB->getParent()->getName() << "\n";
+								builder.CreateCall(hookReportFlops, {});
+                                errs() << "Inserted reportFlops call after measureKernel(2) in function " << BB->getParent()->getName() << "\n";
+								modified = true;
+								return true; // Stop after first insertion in this BB
+							}
+						}
+					}
+				}
+			}
+		}
+		return modified;
+	}
+}; // end of pass
+
+	struct instru_kernel_flops : public ModulePass {
+        static char ID;
+        Function *hook5; // Reuse hook5 (print5)
+        Value* p_stackzone; // To pass the stackzone pointer
+
+        instru_kernel_flops() : ModulePass(ID) {}
 
         virtual bool runOnModule(Module &M) {
             LLVMContext &C = M.getContext();
             Type* VoidTy = Type::getVoidTy(C);
+            Type* Int8PtrTy = Type::getInt8PtrTy(C);
+            Type* Int32Ty = Type::getInt32Ty(C);
 
-            errs() << "\n ======== 10th pass: Memory Bandwidth Reporting Hook =============== \n\n";
+            errs() << "\n ======== GPU Kernel FLOPs Counter =============== \n\n";
 
-			Constant *hookFuncReportBandwidth = cast<Function>(M.getOrInsertFunction("reportMemoryBandwidth", VoidTy).getCallee());
-            if (!hookFuncReportBandwidth) {
-                errs() << "Error: Could not insert reportMemoryBandwidth function!\n";
+            // Get or insert hook5 (print5)
+            // Signature: void print5(void* p, int bits, int sline, int scolm, int op, void* p_stackzone)
+            FunctionType *hook5Ty = FunctionType::get(VoidTy, {Int8PtrTy, Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int8PtrTy}, false);
+            Constant *hookFunc5 = cast<Function>(M.getOrInsertFunction(AF[3], hook5Ty).getCallee()); // AF[3] is "print5"
+            if (!hookFunc5) {
+                errs() << "Error: Could not find or insert runtime function print5 (AF[3]) for FLOPs pass!\n";
                 return false;
             }
-
-            hookReportBandwidth = cast<Function>(hookFuncReportBandwidth);
-
-			hookMeasureKernel = cast<Function>(M.getOrInsertFunction("measureKernel", VoidTy, Type::getInt32Ty(C)).getCallee());
-            if (!hookMeasureKernel) {
-                 errs() << "Warning: measureKernel function not found. Bandwidth reporting hook cannot be inserted.\n";
-                 return false;
-            }
-
+            hook5 = cast<Function>(hookFunc5);
 
             bool modified = false;
-            for(Module::iterator F = M.begin(), E = M.end(); F!= E; ++F) {
-
+            for (Module::iterator F = M.begin(), E = M.end(); F != E; ++F) {
+                std::string fname = F->getName().str();
                 bool isKernel = false;
-                for (int ii=0; ii<KNcnt; ii++) {
-                    if ( F->getName().str().find(CUDAKN[ii]) != std::string::npos ) {
+                for (int ii = 0; ii < KNcnt; ii++) {
+                    if (fname.find(CUDAKN[ii]) != std::string::npos) {
                         isKernel = true;
                         break;
                     }
                 }
-                if (isKernel) continue;
 
-                bool isAnalysisFunc = false;
-                for (int ii=0; ii<AFsize; ii++) {
-                    if ( F->getName().str().find(AF[ii]) != std::string::npos ) {
-                        isAnalysisFunc = true;
-                        break;
+                if (!isKernel) continue;
+
+                // Determine p_stackzone for this kernel
+                // It assumes InitKernel is the first call in the entry block of a kernel
+                // and its return value is used as p_stackzone.
+                // If your p_stackzone logic is different, adapt this.
+                p_stackzone = nullptr;
+                if (F->hasFnAttribute(Attribute::NoUnwind) && !F->isDeclaration()) { // Check if function has a body
+                    BasicBlock &entryBB = F->getEntryBlock();
+                    if (entryBB.getFirstNonPHI()) {
+                         if (CallInst *initCall = dyn_cast<CallInst>(entryBB.getFirstNonPHI())) {
+                            if (initCall->getCalledFunction() && initCall->getCalledFunction()->getName().startswith("InitKernel")) {
+                                p_stackzone = initCall;
+                            }
+                         }
                     }
                 }
-                 if (isAnalysisFunc) continue;
+                if (!p_stackzone) {
+                     // Fallback or error if p_stackzone cannot be determined for a kernel
+                     // For simplicity, trying to get the last argument if it's a pointer (like in instru_kernel_sig)
+                     // This part needs to be robust based on how p_stackzone is actually established for kernels.
+                     if (!F->arg_empty()) {
+                        Argument *lastArg = F->getArg(F->arg_size() - 1);
+                        if (lastArg->getType()->isPointerTy()) {
+                             p_stackzone = lastArg;
+                        } else {
+                            errs() << "Warning: Could not determine p_stackzone for FLOP counting in kernel: " << F->getName() << ". Using null.\n";
+                            p_stackzone = ConstantPointerNull::get((llvm::PointerType*)Int8PtrTy);
+                        }
+                     } else {
+                        errs() << "Warning: Could not determine p_stackzone for FLOP counting in kernel: " << F->getName() << " (no args). Using null.\n";
+                        p_stackzone = ConstantPointerNull::get((llvm::PointerType*)Int8PtrTy);
+                     }
+                }
 
 
-                for(Function::iterator BB = F->begin(), E = F->end(); BB != E; ++BB) {
-                    if (runOnBasicBlock(BB)) {
+                for (Function::iterator BB = F->begin(), BE = F->end(); BB != BE; ++BB) {
+                    if (runOnBasicBlock(&(*BB))) {
                         modified = true;
                     }
                 }
             }
             return modified;
         }
+	
 
-        virtual bool runOnBasicBlock(Function::iterator &BB) {
-            bool modified = false;
+        virtual bool runOnBasicBlock(BasicBlock *BB) {
+            bool modifiedInBlock = false;
             LLVMContext &C = BB->getContext();
+            Value *nullPtr = ConstantPointerNull::get(Type::getInt8PtrTy(C));
+            Value *zeroBits = ConstantInt::get(Type::getInt32Ty(C), 0);
+            Value *flopOpType = ConstantInt::get(Type::getInt32Ty(C), 3); // 3 for generic FLOP
 
-            for(BasicBlock::iterator BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
-                if (auto *op = dyn_cast<CallInst>(&(*BI))) {
-                    Function* calledFunc = op->getCalledFunction();
-                    if (calledFunc == hookMeasureKernel) {
-                        // Check if it's the measureKernel(2) call
-                        if (op->getNumOperands() == 1) {
-                            Value* arg = op->getArgOperand(0);
-                            if (auto* constInt = dyn_cast<ConstantInt>(arg)) {
-                                if (constInt->getZExtValue() == 2) {
-                                    // Found measureKernel(2), insert reportMemoryBandwidth call after it
-                                    IRBuilder<> builder(op);
-                                    builder.SetInsertPoint(&(*BB), ++builder.GetInsertPoint()); // Point after the CallInst
-                                    builder.CreateCall(hookReportBandwidth, {});
-                                    errs() << "Inserted reportMemoryBandwidth call after measureKernel(2) in function " << BB->getParent()->getName() << "\n";
-                                    modified = true;
-                                    return true; // Stop after first insertion in this BB
-                                }
-                            }
+            if (!p_stackzone) { // Ensure p_stackzone is valid
+                p_stackzone = ConstantPointerNull::get(Type::getInt8PtrTy(C)); // Fallback
+            }
+
+
+            for (BasicBlock::iterator BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
+                Instruction *I = &(*BI);
+                bool isFlop = false;
+
+                if (BinaryOperator *BO = dyn_cast<BinaryOperator>(I)) {
+                    switch (BO->getOpcode()) {
+                        case Instruction::FAdd:
+                        case Instruction::FSub:
+                        case Instruction::FMul:
+                        case Instruction::FDiv:
+                            isFlop = true;
+                            break;
+                        default:
+                            break;
+                    }
+                } else if (CallInst *CI = dyn_cast<CallInst>(I)) {
+                    if (Function *calledFunc = CI->getCalledFunction()) {
+                        StringRef funcName = calledFunc->getName();
+                        if (funcName.startswith("llvm.fma.f")) { // Catches fma.f32, fma.f64 etc.
+                            isFlop = true;
                         }
+                        // Add other FP intrinsic checks if needed (e.g., fmuladd)
                     }
                 }
+
+                if (isFlop) {
+                    IRBuilder<> builder(I);
+                    builder.SetInsertPoint(BB, ++builder.GetInsertPoint()); // Insert after the FP instruction
+
+                    const DebugLoc &loc = I->getDebugLoc();
+                    Value *slineVal = ConstantInt::get(Type::getInt32Ty(C), loc ? loc.getLine() : 0);
+                    Value *scolmVal = ConstantInt::get(Type::getInt32Ty(C), loc ? loc.getCol() : 0);
+                    
+                    // Ensure p_stackzone has the correct type if it was derived from an argument or call
+                    Value* casted_p_stackzone = p_stackzone;
+                    if (p_stackzone->getType() != Type::getInt8PtrTy(C)) {
+                        casted_p_stackzone = builder.CreatePointerCast(p_stackzone, Type::getInt8PtrTy(C));
+                    }
+
+
+                    CallInst* call = builder.CreateCall(hook5, {nullPtr, zeroBits, slineVal, scolmVal, flopOpType, casted_p_stackzone});
+                    if (loc) {
+                        call->setDebugLoc(loc);
+                    }
+                    modifiedInBlock = true;
+                }
             }
-            return modified;
+            return modifiedInBlock;
         }
-    }; // end of pass
+    };
 
 
 }
@@ -3146,3 +3303,6 @@ static RegisterPass<instru_host_measure> XXYYXXX("instru-host-measure", "host si
 
 char instru_memory_bandwidth::ID = 0; 
 static RegisterPass<instru_memory_bandwidth> XXYYYXX("instru-mem-bw", "host side memory bandwidth reporting hook", false, false);
+
+char instru_kernel_flops::ID = 0;
+static RegisterPass<instru_kernel_flops> XXYYYXY("instru-kernel-flops", "CUDA kernel FLOPs counter instrumentation", false, false);
