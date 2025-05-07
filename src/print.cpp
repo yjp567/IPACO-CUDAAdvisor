@@ -1010,6 +1010,41 @@ void reportMemoryBandwidth() {
     }
 }
 
+void reportFlops() {
+    if (g_timingStarted.load() && g_timingEnded.load()) {
+        std::chrono::duration<double> duration_chrono = g_kernelEndTime - g_kernelStartTime;
+        double duration_sec = duration_chrono.count();
+
+        unsigned long long totalFlops = g_currentKernelTotalFlops.load();
+
+        char range_str[100];
+        if (g_targetStartLine > 0 && g_targetEndLine > 0) {
+            snprintf(range_str, sizeof(range_str), "for lines %d-%d", g_targetStartLine, g_targetEndLine);
+        } else {
+            snprintf(range_str, sizeof(range_str), "for whole kernel");
+        }
+
+        // Print kernel execution time (consistent with bandwidth report)
+        // This might be redundant if reportMemoryBandwidth also prints it, but good for a standalone report.
+        // printf("[CUDAAdvisor FLOPs] Kernel Execution Time (chrono): %.6f ms\n", duration_sec * 1000.0);
+
+        printf("[CUDAAdvisor FLOPs] Total Floating-Point Operations (%s): %llu FLOPs\n", range_str, totalFlops);
+        if (duration_sec > 1e-9) {
+            double gflops_per_sec = (static_cast<double>(totalFlops) / duration_sec) / 1e9;
+            printf("[CUDAAdvisor FLOPs] Achieved Performance (%s): %.3f GFLOP/s\n", range_str, gflops_per_sec);
+        } else {
+            printf("[CUDAAdvisor FLOPs] Kernel Execution Time too short for GFLOP/s calculation (%s).\n", range_str);
+        }
+        // Note: We don't reset g_timingStarted/g_timingEnded here,
+        // as reportMemoryBandwidth might still need them or another report function.
+        // The reset should happen after ALL reports for that kernel timing interval are done,
+        // or be handled by the next measureKernel(1).
+        // For simplicity, let measureKernel(1) handle all counter resets.
+    } else {
+         printf("[CUDAAdvisor FLOPs] Error: Reporting function called without valid start/end timing data.\n");
+    }
+}
+
 // Called by instrumented host code (potentially before kernel launch)
 // to set the target line range for bandwidth measurement.
 void setLineRangeTarget(int startLine, int endLine) {
