@@ -543,7 +543,7 @@ __device__ void print5(void* p, int bits, int sline, int scolm, int op, void* p_
 		return;
 
 			bool isInRange = (d_targetStartLine == -1 || d_targetEndLine == -1 || (sline >= d_targetStartLine && sline <= d_targetEndLine));
-			if (isInRange)
+			if (!isInRange)
 			{return;}
         storeLines(p, (short)(bits/8), (short)sline, (short) scolm, (short)op, p_stackzone);
 //	printf("d: ea: %p by (%d,%d) (%d,%d), CTA id = %d\n",p, blockIdx.x, threadIdx.x, blockIdx.y, threadIdx.y , (blockIdx.x  + blockIdx.y* gridDim.x));
