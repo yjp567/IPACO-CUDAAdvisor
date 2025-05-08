@@ -2747,7 +2747,7 @@ namespace{
 
 
 					
-					CallInst* tmpI = builder.CreateCall(hookRet);
+					CallInst* tmpI = builder.CreateCall(hookRet , {p_stackzone});
 					if(loc && tmpI != NULL)
                                         	tmpI->setDebugLoc(loc);
 				}
@@ -2813,7 +2813,7 @@ namespace{
                                	// arg2 = (Value*) &a;
 				ii++;
 			}
-			builder.SetInsertPoint( &(*BB), ++builder.GetInsertPoint() ); // insert after op
+			builder.SetInsertPoint( &(*BB) , ++builder.GetInsertPoint() ); // insert after op
 			
 			arg1 = builder.CreatePointerCast(arg1, Type::getInt8PtrTy(C) );
 			CallInst* tmpI = builder.CreateCall(hookInit, {arg1});
