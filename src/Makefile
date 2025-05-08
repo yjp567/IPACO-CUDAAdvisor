@@ -1,6 +1,6 @@
 all: sbsi
 
-DEBUG =
+DEBUG = -g
 OPTAPP = -O0
 OPT = -O0 -std=c++14
 GC = g++ -std=c++14 #for unordered_map
@@ -13,13 +13,19 @@ CFLAGS = # -I/usr/lib/gcc/x86_64-linux-gnu/4.8/include/ -std=c++11
 ANSF =$(UPATH)/ansf.cu
 HOST_SO =libprint.so
 
-INSTRU =  -instru-host-measure instru-kernel-memory -instru-mem-bw -constmerge -bw-start-line=-1 -bw-end-line=-1 #-instru-kernel-flops
+# INSTRU = -instru-kernel-basic
+INSTRU = -instru-kernel-sig -instru-kernel-flops \ 
+# -instru-host-measure -instru-mem-bw \
+ #-instru-kernel-flops \
+#  -instru-kernel-sig \
+#   -instru-kernel-basic \
+#   -instru-kernel-memory
+
 
 AUXSRC = 
 AUXOBJ =
 
 $(PASS) : $(UPATH)/../LLVM_advisor.cpp $(UPATH)/../common.h
-	#cd  $(UPATH)/..; sh auto.sh;
 
 ll : device.clean.ll ansf.ll device.link.ll device.ll device.ll device.ll host.ll hosttmp.ll hosti.ll
 
@@ -43,8 +49,9 @@ clang: $(SRC)
 bc:
 	$(clang) $(DEBUG) $(OPT) $(SRC) -emit-llvm -c -save-temps
 
-device.bc instru: device.link.bc $(PASS) 
-	$(opt) -load $(PASS) $(INSTRU) < device.link.bc > device.bc
+device.ll instru: device.link.ll $(PASS)                         # before ptxas
+	$(opt) -load $(PASS) $(INSTRU) -S device.link.ll -o device.ll
+#	llvm-dis device.bc -o device.ll	
 
 clean: 
 	rm -f *.o *.bc *.ll *.s  native_ax* *.cubin *.ptx *.fatbin a.out *.cui *cudafe* *cpp*.i* *fatbin.c *module_id *.reg.c $(EXE) native clang
@@ -104,11 +111,11 @@ host.bc: device.fatbin $(SRC)
 #	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm -c $(SRC) -o host.bc -fcuda-include-gpubinary device.fatbin
 #    $(clang) $(DEBUG) $(OPT) $(CFLAGS) --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm -c $(SRC) -o host.bc -fcuda-include-gpubinary device.fatbin
 
-device.ptx: device.bc
-	llc device.bc -march=nvptx64 -mcpu=sm_86 -mattr=+ptx70 -filetype=asm -o device.ptx
+device.ptx: device.ll
+	llc device.ll -march=nvptx64 -mcpu=sm_86 -mattr=+ptx70 -filetype=asm -o device.ptx
 
 device.o :  device.ptx
-	ptxas --gpu-name sm_86  device.ptx -o device.o -g -v -maxrregcount=31 #for verbose, resources check
+	ptxas --gpu-name sm_86  device.ptx -o device.o -v -maxrregcount=31
 
 device.fatbin: device.o host.cui 
 	fatbinary --cuda -64 --create device.fatbin --image=profile=$(SM),file=device.o --image=profile=$(CP),file=device.ptx -link
@@ -116,17 +123,15 @@ device.fatbin: device.o host.cui
 host.cui: $(SRC)
 	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -E --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) $(SRC) -o host.cui
 	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -c --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(SRC) -o host.clean.bc
-	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -c -S --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(SRC) -o host.clean.ll
+	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -S --cuda-host-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(SRC) -o host.clean.ll
 
-device.clean.bc:  $(SRC)
-	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -c --cuda-device-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(SRC) -o device.clean.bc
+device.clean.ll:  $(SRC)
+#	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -c --cuda-device-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(SRC) -o device.clean.bc
 	$(clang) $(DEBUG) $(OPTAPP) $(CFLAGS) -c --cuda-device-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) $(SRC) -S -emit-llvm -o device.clean.ll
 
-ansf.bc :  $(ANSF) $(UPATH)/../common.h  $(UPATH)/types.h
-	$(clang) $(DEBUG) $(OPT) -c --cuda-device-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(ANSF) -o ansf.bc
+ansf.ll :  $(ANSF) $(UPATH)/../common.h  $(UPATH)/types.h
+	$(clang) $(DEBUG) $(OPT) -c --cuda-device-only --cuda-gpu-arch=$(SM) --cuda-path=$(cuda) -emit-llvm $(ANSF)  -S -emit-llvm -o ansf.ll
 
-device.link.bc: device.clean.bc ansf.bc 
-	$(llvm-link) device.clean.bc ansf.bc -o=device.link.bc
-
-
-
+device.link.ll: device.clean.ll ansf.ll 
+	llvm-link device.clean.ll -o device.link.bc
+	llvm-dis device.link.bc -o device.link.ll
